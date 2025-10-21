@@ -52,9 +52,24 @@ async function loadConfig(): Promise<AzureOpenAIConfig> {
   }
 }
 
+interface ResponseFormat {
+  type: "json_schema";
+  json_schema: {
+    name: string;
+    strict: boolean;
+    schema: {
+      type: "object";
+      properties: Record<string, any>;
+      required: string[];
+      additionalProperties: boolean;
+    };
+  };
+}
+
 export async function chatWithAzureOpenAI(
   messages: ChatMessage[],
   systemPrompt?: string,
+  responseFormat?: ResponseFormat,
 ): Promise<string> {
   const cfg = await loadConfig();
 
@@ -69,17 +84,23 @@ export async function chatWithAzureOpenAI(
   console.log("Making request to:", url);
   console.log("Using deployment:", cfg.deployment);
 
+  const requestBody: any = {
+    messages: allMessages,
+    temperature: 0.7,
+    max_tokens: 1000,
+  };
+
+  if (responseFormat) {
+    requestBody.response_format = responseFormat;
+  }
+
   const response = await fetch(url, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
       "api-key": cfg.apiKey,
     },
-    body: JSON.stringify({
-      messages: allMessages,
-      temperature: 0.7,
-      max_tokens: 1000,
-    }),
+    body: JSON.stringify(requestBody),
   });
 
   if (!response.ok) {
@@ -120,12 +141,6 @@ Your task:
 2. Generate a valid DuckDB SQL query
 3. Provide a brief explanation
 
-Respond in JSON format:
-{
-  "query": "SELECT ...",
-  "explanation": "This query will..."
-}
-
 Important:
 - Use double quotes for table names: "table_name"
 - DuckDB supports standard SQL and many PostgreSQL features
@@ -139,26 +154,45 @@ Important:
     },
   ];
 
-  const response = await chatWithAzureOpenAI(messages, systemPrompt);
+  // Use Structured Outputs for guaranteed JSON format
+  const responseFormat: ResponseFormat = {
+    type: "json_schema",
+    json_schema: {
+      name: "query_suggestion",
+      strict: true,
+      schema: {
+        type: "object",
+        properties: {
+          query: {
+            type: "string",
+            description: "The DuckDB SQL query"
+          },
+          explanation: {
+            type: "string",
+            description: "A brief explanation of what the query does"
+          }
+        },
+        required: ["query", "explanation"],
+        additionalProperties: false
+      }
+    }
+  };
+
+  const response = await chatWithAzureOpenAI(messages, systemPrompt, responseFormat);
 
   try {
-    // Extract JSON from response (handle markdown code blocks)
-    const jsonMatch = response.match(/\{[\s\S]*\}/);
-    if (jsonMatch) {
-      const parsed = JSON.parse(jsonMatch[0]);
-      return {
-        query: parsed.query || "",
-        explanation: parsed.explanation || "",
-      };
-    }
+    // With Structured Outputs, the response is guaranteed to be valid JSON
+    const parsed = JSON.parse(response);
+    return {
+      query: parsed.query || "",
+      explanation: parsed.explanation || "",
+    };
   } catch (error) {
     console.error("Failed to parse AI response:", error);
+    // This should never happen with Structured Outputs, but keep as fallback
+    return {
+      query: "",
+      explanation: response,
+    };
   }
-
-  // Fallback: try to extract SQL query
-  const sqlMatch = response.match(/SELECT[\s\S]*?;/i);
-  return {
-    query: sqlMatch ? sqlMatch[0] : "",
-    explanation: response,
-  };
 }
